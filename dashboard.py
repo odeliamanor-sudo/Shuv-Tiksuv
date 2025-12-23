@@ -2,134 +2,96 @@ import time
 import numpy as np
 import pandas as pd
 import streamlit as st
-import matplotlib.pyplot as plt
 import plotly.graph_objects as go
+import plotly.express as px
 
-# ===============================
-# PAGE CONFIG
-# ===============================
-st.set_page_config(
-    page_title="Shuv-Tikshuv | Simulation Dashboard",
-    layout="wide"
-)
+from sim_core import run_replications, run_one_week_with_snapshots
 
-st.title("📊 Shuv-Tikshuv – Simulation Control Room")
-st.markdown(
-    "אנימציה אינטראקטיבית המדגימה את התפתחות מערכת השירות לאורך זמן "
-    "(Playback, Heatmap, Sankey, מדדים דינמיים)"
-)
+st.set_page_config(page_title="Shuv-Tikshuv | Control Room", layout="wide")
 
-# ===============================
-# DATA GENERATION (SELF CONTAINED)
-# ===============================
+st.markdown("""
+<style>
+.stApp {background: linear-gradient(180deg,#0b1020,#08162f); color: #e8eefc;}
+.block-container{padding-top:1rem;}
+.card{border:1px solid rgba(255,255,255,.12); border-radius:16px; padding:12px 14px;
+background: rgba(255,255,255,.06); backdrop-filter: blur(10px);}
+</style>
+""", unsafe_allow_html=True)
+
+st.markdown("<div class='card'><h1>🛰 Shuv-Tikshuv Control Room</h1><div>Playback + סטטיסטיקות מתוך הסימולציה שלכם</div></div>", unsafe_allow_html=True)
+
+with st.sidebar:
+    st.header("⚙️ Run")
+    seed = st.number_input("Seed", 1, 999999, 2025)
+    reps = st.slider("Replications", 10, 80, 40)
+    play = st.toggle("▶ Play", value=False)
+    speed = st.slider("Speed", 0.02, 0.25, 0.08)
+
 @st.cache_data
-def generate_data():
-    np.random.seed(42)
-    T = 300
-    t = np.arange(T)
+def cached_replications(reps, seed):
+    return run_replications(reps, seed0=seed)
 
-    peak1 = np.exp(-0.5 * ((t - 80) / 20) ** 2)
-    peak2 = np.exp(-0.5 * ((t - 200) / 30) ** 2)
-    load = 0.5 + 1.8 * peak1 + 1.4 * peak2
+@st.cache_data
+def cached_one(seed):
+    res, snap = run_one_week_with_snapshots(seed=seed)
+    return res, snap
 
-    q_fault = np.maximum(0, (20 * load + np.random.randn(T) * 2)).astype(int)
-    q_train = np.maximum(0, (14 * load + np.random.randn(T) * 1.5)).astype(int)
-    q_senior = np.maximum(0, (8 * load + np.random.randn(T))).astype(int)
+agg = cached_replications(reps, seed)
+res1, snap = cached_one(seed)
 
-    abandon = np.cumsum((np.random.rand(T) < 0.01 * load).astype(int))
-
-    df = pd.DataFrame({
-        "t": t,
-        "fault": q_fault,
-        "train": q_train,
-        "senior": q_senior,
-        "total": q_fault + q_train + q_senior,
-        "abandon": abandon
-    })
-    return df
-
-df = generate_data()
-
-# ===============================
-# CONTROLS
-# ===============================
-play = st.toggle("▶ Play animation", value=False)
-speed = st.slider("Speed", 0.02, 0.2, 0.08)
-
-if "frame" not in st.session_state:
-    st.session_state.frame = 0
-
+# Playback frame
+if "i" not in st.session_state:
+    st.session_state.i = 0
 if play:
-    st.session_state.frame = (st.session_state.frame + 1) % len(df)
+    st.session_state.i = (st.session_state.i + 1) % len(snap)
     time.sleep(speed)
     st.rerun()
 
-row = df.iloc[st.session_state.frame]
+row = snap.iloc[st.session_state.i]
 
-# ===============================
-# KPI METRICS
-# ===============================
-c1, c2, c3, c4 = st.columns(4)
-c1.metric("Total Queue", int(row.total))
-c2.metric("Fault Queue", int(row.fault))
-c3.metric("Train / Join Queue", int(row.train))
-c4.metric("Abandonments (cum)", int(row.abandon))
+# KPI cards
+c1,c2,c3,c4 = st.columns(4)
+for col, title, val in [
+    (c1,"Total Queue", int(row.q_fault + row.q_train_join + row.q_senior)),
+    (c2,"Active Agents", int(row.active_agents)),
+    (c3,"Idle Total", int(row.idle_total)),
+    (c4,"Abandoned (cum)", int(row.aband_cum)),
+]:
+    col.markdown(f"<div class='card'><h3>{title}</h3><h2>{val}</h2></div>", unsafe_allow_html=True)
 
-# ===============================
-# LINE + STACKED GRAPH
-# ===============================
-left, right = st.columns(2)
-
-with left:
-    st.subheader("Total Queue Over Time")
-    fig, ax = plt.subplots()
-    ax.plot(df["t"], df["total"])
-    ax.axvline(row.t, linestyle="--")
-    ax.set_xlabel("Time")
-    ax.set_ylabel("Requests")
-    st.pyplot(fig)
-
-with right:
-    st.subheader("Queue Composition")
-    fig, ax = plt.subplots()
-    ax.stackplot(
-        df["t"],
-        df["fault"],
-        df["train"],
-        df["senior"],
-        labels=["Fault", "Train", "Senior"]
-    )
-    ax.axvline(row.t, linestyle="--")
-    ax.legend()
-    st.pyplot(fig)
-
-# ===============================
-# HEATMAP
-# ===============================
-st.subheader("Abandonments Heatmap (conceptual)")
-heat = np.random.rand(5, 24)
-fig, ax = plt.subplots()
-im = ax.imshow(heat, aspect="auto")
-ax.set_xlabel("Hour")
-ax.set_ylabel("Day")
-fig.colorbar(im, ax=ax)
-st.pyplot(fig)
-
-# ===============================
-# SANKEY (WOW EFFECT)
-# ===============================
-st.subheader("System Flow – Sankey Diagram")
-
-fig = go.Figure(data=[go.Sankey(
-    node=dict(
-        pad=15,
-        thickness=20,
-        label=["Arrivals", "Fault", "Train", "Senior", "Served", "Abandoned"]
-    ),
-    link=dict(
-        source=[0,0,0,1,2,3],
-        target=[1,2,3,4,4,5],
-        value=[50,30,20,40,30,10]
-    )
-)])
+# Timeline with current marker
+st.markdown("<div class='card'>", unsafe_allow_html=True)
+fig = go.Figure()
+fig.add_trace(go.Scatter(x=snap["t"], y=snap["q_fault"], mode="lines", name="Fault Q"))
+fig.add_trace(go.Scatter(x=snap["t"], y=snap["q_train_join"], mode="lines", name="Train/Join Q"))
+fig.add_trace(go.Scatter(x=snap["t"], y=snap["q_senior"], mode="lines", name="Senior Q"))
+fig.add_vline(x=float(row.t), line_width=2, line_dash="dash")
+fig.update_layout(height=360, margin=dict(l=10,r=10,t=30,b=10),
+                  paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
 st.plotly_chart(fig, use_container_width=True)
+st.markdown("</div>", unsafe_allow_html=True)
+
+# Heatmap abandon by hour (from replications result)
+st.markdown("<div class='card'>", unsafe_allow_html=True)
+st.subheader("🔥 Abandonments per hour (avg per day)")
+ab = agg["Abandon_hour_avg_per_day"]
+fig2 = px.bar(x=list(range(24)), y=ab, labels={"x":"Hour","y":"Avg/day"})
+fig2.update_layout(height=300, margin=dict(l=10,r=10,t=30,b=10),
+                   paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
+st.plotly_chart(fig2, use_container_width=True)
+st.markdown("</div>", unsafe_allow_html=True)
+
+# Time in system distribution (replications)
+st.markdown("<div class='card'>", unsafe_allow_html=True)
+st.subheader("⏱ Time in system (distribution)")
+order = ["fault","train","join","disconnect"]
+df_box = []
+for k in order:
+    for v in agg["system_time_all"][k]:
+        df_box.append({"type": k, "minutes": v})
+df_box = pd.DataFrame(df_box)
+fig3 = px.violin(df_box, x="type", y="minutes", box=True, points=False)
+fig3.update_layout(height=320, margin=dict(l=10,r=10,t=30,b=10),
+                   paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
+st.plotly_chart(fig3, use_container_width=True)
+st.markdown("</div>", unsafe_allow_html=True)
